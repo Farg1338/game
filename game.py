@@ -15,7 +15,7 @@ try:
 except Exception:
     SOUND_OK=False
 
-GAME_VERSION = 7  # версия игры для синхронизации профиля
+GAME_VERSION = 8  # версия игры для синхронизации профиля
 
 WIDTH, HEIGHT = 1100, 720
 screen = pygame.display.set_mode((WIDTH, HEIGHT), pygame.FULLSCREEN | pygame.SCALED)
@@ -403,11 +403,8 @@ def set_map(idx):
     global PATH, PATH2, PATHS, ANDREY_POS, DIMA_POS
     m = MAPS[idx]
     PATH = m["path"]; ANDREY_POS = m["andrey"]; DIMA_POS = m["dima"]
-    # вторая дорожка строится автоматически: сверху к той же базе
-    ex, ey = PATH[-1]
-    midy = max(140, ey//2)
-    PATH2 = [(ex//2, -20), (ex//2, midy), (ex, midy), (ex, ey)]
-    PATHS = [PATH, PATH2]
+    PATH2 = []
+    PATHS = [PATH]
     build_background()
 
 def dist(ax,ay,bx,by):
@@ -480,7 +477,7 @@ TURRETS = {
     "Мороз":   {"dmg":3, "cooldown":0.40,"range":150,"cost":170,"color":CYAN,   "bspeed":13,"aoe":0, "slow":1.4,"poison":0, "dtype":"ice"},
     "Яд":      {"dmg":3, "cooldown":0.8, "range":160,"cost":200,"color":POISONC,"bspeed":12,"aoe":0, "slow":0,  "poison":16,"dtype":"poison"},
     "Банк":    {"dmg":0, "cooldown":1.0, "range":0,  "cost":260,"color":(90,200,140),"bspeed":1,"aoe":0,"slow":0,"poison":0,"dtype":"econ","income":18,"interval":3.0},
-    "Казарма": {"dmg":0, "cooldown":1.0, "range":0,  "cost":300,"color":(90,150,235),"bspeed":1,"aoe":0,"slow":0,"poison":0,"dtype":"summon","interval":5.0},
+    "Казарма": {"dmg":0, "cooldown":1.0, "range":0,  "cost":300,"color":(90,150,235),"bspeed":1,"aoe":0,"slow":0,"poison":0,"dtype":"summon","interval":7.0},
 }
 TURRET_ORDER = ["Пушка","Пулемёт","Огнемёт","Мороз","Яд","Банк","Казарма"]
 
@@ -620,29 +617,47 @@ def _apply_spec_choice(spec_key):
             play_sound("buy")
 
 class Ally:
-    """Союзник Казармы: идёт от базы по дороге навстречу врагам и дерётся."""
-    def __init__(self, hp=120, dmg=30, speed=78):
+    """Союзник Казармы: идёт от базы по дороге навстречу врагам.
+    Ур.1 — только ближний бой; ур.2+ — ещё и стреляет. Облик зависит от уровня."""
+    def __init__(self, hp=60, dmg=14, speed=70, level=1):
         self.path = PATH
         self.idx = len(self.path)-1
         self.x, self.y = self.path[self.idx]
+        self.level = max(1, level)
         self.hp = hp; self.max_hp = hp; self.dmg = dmg; self.speed = speed
-        self.alive = True; self.atk_cd = 0.0; self.flash = 0.0
+        self.alive = True; self.atk_cd = 0.0; self.shoot_cd = 0.0; self.flash = 0.0
+        self.ranged = self.level >= 2
+        self.shoot_range = 150
     def update(self, dt):
         if self.flash>0: self.flash-=dt
+        if self.ranged:
+            self.shoot_cd-=dt
+            tgt=None; best=self.shoot_range
+            for e in G.get("enemies", []):
+                if getattr(e,"alive",False):
+                    d=dist(self.x,self.y,e.x,e.y)
+                    if d<best: best=d; tgt=e
+            if tgt is not None and self.shoot_cd<=0:
+                self.shoot_cd=0.7
+                ang=math.atan2(tgt.y-self.y, tgt.x-self.x); bs=11
+                G["bullets"].append(Bullet(self.x,self.y,math.cos(ang)*bs,math.sin(ang)*bs,
+                                    self.dmg,(120,200,255),4,target=tgt))
+                play_sound("shoot", throttle_ms=90)
         target=None; best=1e9
         for e in G.get("enemies", []):
             if getattr(e,"alive",False):
                 d=dist(self.x,self.y,e.x,e.y)
-                if d<34 and d<best: best=d; target=e
+                if d<e.radius+13 and d<best: best=d; target=e
         if target is not None:
             self.atk_cd-=dt
             if self.atk_cd<=0:
-                self.atk_cd=0.45
+                self.atk_cd=0.5
                 target.hit(self.dmg)
                 try: G["floats"].append(FloatText(target.x,target.y-target.radius,self.dmg,(120,200,255)))
                 except Exception: pass
-                self.hp-=16; self.flash=0.1
-                if self.hp<=0: self.alive=False
+            self.hp-=22*dt
+            self.flash=0.1
+            if self.hp<=0: self.alive=False
             return
         if self.idx>0:
             tx,ty=self.path[self.idx-1]
@@ -654,16 +669,22 @@ class Ally:
         else:
             self.alive=False
     def draw(self, s):
-        x,y=int(self.x),int(self.y)
+        x,y=int(self.x),int(self.y); lvl=max(1,min(3,self.level))
         sh=pygame.Surface((24,10),pygame.SRCALPHA); pygame.draw.ellipse(sh,(0,0,0,90),sh.get_rect())
         s.blit(sh,(x-12,y+8))
-        pygame.draw.circle(s,(80,160,255),(x,y),11)
-        pygame.draw.circle(s,(20,40,90),(x,y),11,2)
-        if self.flash>0: pygame.draw.circle(s,(255,255,255),(x,y),11,2)
-        pygame.draw.line(s,(225,232,248),(x+7,y-7),(x+15,y-15),3)
+        cols={1:(80,160,255),2:(120,210,150),3:(245,205,70)}; r=10+lvl
+        pygame.draw.circle(s,cols[lvl],(x,y),r)
+        pygame.draw.circle(s,(20,40,90),(x,y),r,2)
+        if self.flash>0: pygame.draw.circle(s,(255,255,255),(x,y),r,2)
+        if self.ranged:
+            pygame.draw.line(s,(40,50,70),(x,y),(x+r+5,y),3)
+        else:
+            pygame.draw.line(s,(225,232,248),(x+5,y-5),(x+r+4,y-r-2),3)
+        for i in range(lvl):
+            pygame.draw.circle(s,(255,255,255),(x-6+i*6,y+r+4),2)
         w=24; f=max(0.0,self.hp/self.max_hp)
-        pygame.draw.rect(s,(30,30,38),(x-w//2,y-20,w,4),border_radius=2)
-        pygame.draw.rect(s,(90,220,120),(x-w//2,y-20,int(w*f),4),border_radius=2)
+        pygame.draw.rect(s,(30,30,38),(x-w//2,y-r-9,w,4),border_radius=2)
+        pygame.draw.rect(s,(90,220,120),(x-w//2,y-r-9,int(w*f),4),border_radius=2)
 
 _LAST_TICK = [0]
 def _frame_dt():
@@ -681,7 +702,9 @@ def _update_allies():
     if not isinstance(G, dict): return
     if not G.get("endless") and G.get("max_waves",0) < 30:
         G["max_waves"]=30
-    if G.get("state") not in ("wave","build"): return
+    if G.get("state")!="wave":        # вне волны союзники не ходят и не остаются
+        if G.get("allies"): G["allies"]=[]
+        return
     allies=_ensure_allies()
     for a in allies[:]:
         a.update(dt)
@@ -698,6 +721,10 @@ def _draw_tl_safe():
         if isinstance(G, dict) and G.get("state") in ("wave", "build", "mutator_warn"):
             _draw_allies()
             draw_wave_timeline(); draw_spec_modal()
+    except Exception:
+        pass
+    try:
+        _update_check_tick(); _draw_update_ui()
     except Exception:
         pass
 
@@ -1379,10 +1406,12 @@ class Turret:
                 play_sound("buy", throttle_ms=80)
             return
         if self.base.get("dtype")=="summon":   # Казарма: призывает союзников на дорогу
-            self.income_timer=getattr(self,"income_timer",self.base.get("interval",5.0))-dt
+            if G.get("state")!="wave":          # во время перерыва между волнами не призывает
+                return
+            self.income_timer=getattr(self,"income_timer",self.base.get("interval",7.0))-dt
             if self.income_timer<=0:
-                self.income_timer=self.base.get("interval",5.0)
-                _ensure_allies().append(Ally(hp=90+self.level*45, dmg=22+self.level*12, speed=78))
+                self.income_timer=self.base.get("interval",7.0)
+                _ensure_allies().append(Ally(hp=45+self.level*22, dmg=9+self.level*5, speed=70, level=self.level))
                 play_sound("buy", throttle_ms=120)
             return
         if G.get("turret_stun",0)>0:   # башни оглушены битой Валеры
@@ -1433,41 +1462,47 @@ class Turret:
         self._draw_body(s, base_r, selected)
 
     def _draw_body(self, s, base_r, selected):
-        """Корпус башни с уникальной моделью под каждый тип/специализацию."""
+        """Уникальная мини-текстура под каждый тип башни; облик меняется с уровнем."""
         x,y=int(self.x),int(self.y); k=self.kind; spec=getattr(self,"spec",None)
-        a=self.angle; cs,sn=math.cos(a),math.sin(a)
-        pygame.draw.circle(s,self.color,(x,y),base_r)
-        pygame.draw.circle(s,YELLOW if selected else BLACK,(x,y),base_r,3 if selected else 2)
-        def barrel(length,width,col=BLACK):
+        a=self.angle; cs,sn=math.cos(a),math.sin(a); lvl=self.level
+        col=self.color; dark=tuple(int(c*0.55) for c in col)
+        def barrel(length,width,bcol=(30,30,38)):
             ex=x+cs*length; ey=y+sn*length
-            pygame.draw.line(s,col,(x,y),(int(ex),int(ey)),width)
-        if spec=="sniper":
-            barrel(36+self.level*3,4); pygame.draw.circle(s,CYAN,(x,y),5)
-        elif spec=="shrapnel":
-            for da in (-0.34,0.0,0.34):
-                ex=x+math.cos(a+da)*(24+self.level*3); ey=y+math.sin(a+da)*(24+self.level*3)
-                pygame.draw.line(s,BLACK,(x,y),(int(ex),int(ey)),5)
-            pygame.draw.circle(s,ORANGE,(x,y),5)
-        elif k=="Пушка":
-            barrel(24+self.level*4,9+self.level); pygame.draw.circle(s,(60,60,72),(x,y),max(5,self.level+4))
+            pygame.draw.line(s,bcol,(x,y),(int(ex),int(ey)),width)
+        if k=="Пушка":
+            r=pygame.Rect(0,0,base_r*2,base_r*2); r.center=(x,y)
+            pygame.draw.rect(s,col,r,border_radius=5)
+            pygame.draw.rect(s,dark,r,2,border_radius=5)
+            barrel(24+lvl*4,9+lvl); pygame.draw.circle(s,(60,60,72),(x,y),max(5,lvl+4))
         elif k=="Пулемёт":
+            pts=[(int(x+math.cos(a+i*math.pi/3)*base_r), int(y+math.sin(a+i*math.pi/3)*base_r)) for i in range(6)]
+            pygame.draw.polygon(s,col,pts); pygame.draw.polygon(s,dark,pts,2)
             for oy in (-3,3):
-                sx=x-sn*oy; sy=y+cs*oy
-                ex=x+cs*(22+self.level*3)-sn*oy; ey=y+sn*(22+self.level*3)+cs*oy
-                pygame.draw.line(s,BLACK,(int(sx),int(sy)),(int(ex),int(ey)),3+self.level//2)
+                ex=x+cs*(22+lvl*3)-sn*oy; ey=y+sn*(22+lvl*3)+cs*oy
+                pygame.draw.line(s,(30,30,38),(int(x-sn*oy),int(y+cs*oy)),(int(ex),int(ey)),3+lvl//2)
         elif k=="Огнемёт":
-            barrel(18+self.level*2,9+self.level)
-            ex=x+cs*(18+self.level*2); ey=y+sn*(18+self.level*2)
-            pygame.draw.circle(s,(70,40,30),(int(ex),int(ey)),5)
+            pygame.draw.circle(s,col,(x,y),base_r); pygame.draw.circle(s,dark,(x,y),base_r,2)
+            barrel(18+lvl*2,9+lvl,(120,50,30))
+            pygame.draw.circle(s,(255,140,40),(int(x+cs*(18+lvl*2)),int(y+sn*(18+lvl*2))),5+lvl)
         elif k=="Мороз":
-            pts=[(x+math.cos(a+i*math.pi/2)*base_r, y+math.sin(a+i*math.pi/2)*base_r) for i in range(4)]
-            pygame.draw.polygon(s,(180,240,255),[(int(px),int(py)) for px,py in pts],2)
-            barrel(20+self.level*2,5,(120,200,230))
+            pts=[(int(x+math.cos(a+i*math.pi/2)*base_r), int(y+math.sin(a+i*math.pi/2)*base_r)) for i in range(4)]
+            pygame.draw.polygon(s,col,pts); pygame.draw.polygon(s,(180,240,255),pts,2)
+            barrel(20+lvl*2,5,(120,200,230))
         elif k=="Яд":
-            barrel(18+self.level*2,6,(70,150,60))
-            pygame.draw.circle(s,POISONC,(int(x+cs*(18+self.level*2)),int(y+sn*(18+self.level*2))),5)
+            pygame.draw.circle(s,col,(x,y),base_r); pygame.draw.circle(s,(70,150,60),(x,y),base_r,2)
+            barrel(18+lvl*2,6,(70,150,60))
+            pygame.draw.circle(s,POISONC,(int(x+cs*(18+lvl*2)),int(y+sn*(18+lvl*2))),5)
         else:
-            barrel(20+self.level*4,4+self.level)
+            pygame.draw.circle(s,col,(x,y),base_r); pygame.draw.circle(s,dark,(x,y),base_r,2)
+            barrel(20+lvl*4,4+lvl)
+        if spec=="sniper":
+            barrel(36+lvl*3,4,(20,40,60)); pygame.draw.circle(s,CYAN,(x,y),5)
+        elif spec=="shrapnel":
+            for da in (-0.34,0.34):
+                pygame.draw.line(s,(30,30,38),(x,y),(int(x+math.cos(a+da)*(24+lvl*3)),int(y+math.sin(a+da)*(24+lvl*3))),5)
+        for i in range(lvl):
+            pygame.draw.circle(s,YELLOW,(x-(lvl-1)*4+i*8,y+base_r+7),2)
+        pygame.draw.circle(s,YELLOW if selected else BLACK,(x,y),base_r,3 if selected else 2)
         if spec is not None:
             pygame.draw.circle(s,self.color,(x,y),base_r+11,2)
 
@@ -1674,11 +1709,6 @@ def make_wave(n):
     if berserk:                       # мутатор «Берсерки»: быстрее, но меньше HP
         for e in enemies:
             e.max_hp=max(1,int(e.max_hp*0.6)); e.hp=e.max_hp; e.speed*=1.4
-    # С 5-й волны часть врагов идёт по ВТОРОЙ дорожке (сверху) — два фронта
-    if n>=5 and len(PATHS)>1:
-        for i,e in enumerate(enemies):
-            if not e.is_boss and i%2==1:
-                e.path=PATHS[1]; e.idx=0; e.x,e.y=e.path[0]
     return enemies
 
 
@@ -1891,6 +1921,15 @@ def draw_hurt_vignette():
 
 def turret_limit():
     return 8 + (G["wave"]//5)*2
+
+def type_limit(kind):
+    """Отдельный лимит на КАЖДЫЙ тип башни (а не общий на все)."""
+    if kind in ("Казарма","Банк"):
+        return 2 + (G["wave"]//8)
+    return 4 + (G["wave"]//5)
+
+def count_kind(kind):
+    return sum(1 for t in G["turrets"] if getattr(t,"kind",None)==kind)
 
 def has_save():
     return os.path.exists(SAVE_FILE)
@@ -2156,7 +2195,7 @@ def draw_map_select():
                              (140,210,150) if sel==val else (150,190,230), font=font_m)
         elif kind=="mode":
             on=(endless if val=="endless" else not endless)
-            label="БЕСКОНЕЧНЫЙ" if val=="endless" else "ОБЫЧНЫЙ (15 волн)"
+            label="БЕСКОНЕЧНЫЙ" if val=="endless" else "ОБЫЧНЫЙ (30 волн)"
             draw_menu_button(rect, label, (245,200,90) if on else (105,105,125), font=font_m)
         elif kind=="start":
             draw_menu_button(rect, "СТАРТ", (130,210,140), font=font_m)
@@ -2179,7 +2218,7 @@ def start_selected_game():
     """Запуск забега с выбранной картой и режимом."""
     global G
     endless=G.get("sel_endless",False); sm=G.get("sel_map",0)
-    G=new_game(sm, hardcore=False, endless=endless, max_waves=15)
+    G=new_game(sm, hardcore=False, endless=endless, max_waves=30)
     G["started"]=True
 
 # ----- Всплывающее меню над башней (Продать / Улучшить) -----
@@ -2251,6 +2290,14 @@ def draw_part2():
 
 # ----- Патч-ноты (история обновлений) -----
 PATCH_NOTES = [
+    ("Обновление 15 — 30 волн, союзники и авто-апдейт", [
+        "30 волн, боссы на 10/20/30, финал — Кракуля",
+        "Казарма призывает союзников: ур.1 — ближний бой, ур.2+ — стреляют",
+        "Союзники упираются во врагов (не проходят сквозь) и гибнут в бою",
+        "У каждого типа башни свой лимит; уникальный вид и смена облика по уровню",
+        "Убрана вторая дорожка врагов; ночь сохраняется в меню продавцов",
+        "Обновление прямо в игре: всплывает окно «Скачать» без выхода",
+    ]),
     ("Обновление 14 — Новые враги, ночь и достижения", [
         "Призрак: летит напрямую к базе, игнорируя дорогу",
         "Стрелок: останавливается и обстреливает Матвея (bullet hell)",
@@ -2572,8 +2619,8 @@ def draw_hud():
     draw_vgradient(pygame.Rect(0,0,WIDTH,46),(40,40,60),(20,20,30))
     pygame.draw.line(screen,(95,120,180),(0,46),(WIDTH,46),2)
     h=G["hero"]
-    chips=[(f"Деньги {G['money']}",YELLOW),(f"Волна {G['wave']}/15",LIGHT),
-           (f"Жизни {G['lives']}",GREEN),(f"Башни {len(G['turrets'])}/{turret_limit()}",LIGHT),
+    chips=[(f"Деньги {G['money']}",YELLOW),((f"Волна {G['wave']}/30" if not G.get("endless") else f"Волна {G['wave']}"),LIGHT),
+           (f"Жизни {G['lives']}",GREEN),(f"Башни {len(G['turrets'])}",LIGHT),
            (f"{h.weapon}",CYAN),(f"Карта {G['map']+1}",LIGHT),(f"Монеты {PROFILE['coins']}",YELLOW)]
     if G["hardcore"]: chips.append(("ХАРДКОР",(235,140,140)))
     if G.get("mutator"):
@@ -2689,8 +2736,8 @@ def handle_shop_click(pos):
                     else:
                         G["message"]="Мало денег у Димы Трубаза!"
                     return
-                if len(G["turrets"])>=turret_limit():
-                    G["message"]="Достигнут лимит башен!"; return
+                if count_kind(name)>=type_limit(name):
+                    G["message"]=f"Лимит {name}: максимум {type_limit(name)} шт.!"; return
                 if G["money"]>=TURRETS[name]["cost"]:
                     G["selected_turret"]=name; G["sel_turret_obj"]=None
                     G["state"]=G.get("shop_return","build"); G["message"]="Кликни по карте, чтобы поставить: "+name+"  •  ✕ сверху или ESC — отмена"
@@ -2703,8 +2750,8 @@ def try_place_turret(pos):
     x,y=pos
     if y<48: return
     kind=G["selected_turret"]; cost=TURRETS[kind]["cost"]
-    if len(G["turrets"])>=turret_limit():
-        G["message"]="Достигнут лимит башен!"; G["selected_turret"]=None; return
+    if count_kind(kind)>=type_limit(kind):
+        G["message"]=f"Лимит {kind}: максимум {type_limit(kind)} шт.!"; G["selected_turret"]=None; return
     if G["money"]<cost:
         G["message"]="Недостаточно денег!"; return
     if near_path(x,y):
@@ -2969,7 +3016,7 @@ def update_wave(dt, keys):
         G["state"]="gameover"; return
 
     if not G["spawn_queue"] and not G["enemies"]:
-        if G["wave"]>=15:
+        if not G.get("endless") and G["wave"]>=30:
             G["state"]="win"; PROFILE["coins"]+=5; save_profile()
         else:
             G["wave"]+=1; G["money"]+=120
@@ -3087,6 +3134,7 @@ def draw_game():
             draw_close_button(cr)
 
     if G["state"] in ("shop_w","shop_t"):
+        draw_night_overlay()   # ночь сохраняется и в меню продавца
         draw_shop()
     if G["state"] in ("build","wave") and G["sel_turret_obj"]:
         draw_upgrade_panel()
@@ -3117,6 +3165,126 @@ def draw_end(win):
     t2=font_m.render("R — новая игра • ESC — в меню",True,WHITE)
     screen.blit(t2,(WIDTH/2-t2.get_width()/2, HEIGHT/2+30))
 
+
+# ====================== АВТО-ОБНОВЛЕНИЕ В ИГРЕ ======================
+# Периодически проверяет manifest.json на jsDelivr. Если там версия выше
+# GAME_VERSION — показывает окно «Доступно обновление» с кнопкой СКАЧАТЬ.
+# По нажатию скачивает свежий game.py поверх текущего и перезапускает игру.
+_UPDATE_MANIFEST_URL = "https://cdn.jsdelivr.net/gh/Farg1338/game@main/manifest.json"
+_UPDATE_PY_URL       = "https://cdn.jsdelivr.net/gh/Farg1338/game@main/game.py"
+_UPDATE = {"latest": None, "checked": 0, "show": False, "phase": "idle", "err": ""}
+try:
+    _SELF_PATH = os.path.abspath(__file__)
+except Exception:
+    _SELF_PATH = os.path.abspath("game.py")
+
+def _update_check_tick():
+    now = pygame.time.get_ticks()
+    if _UPDATE["phase"] == "restart":
+        _restart_game(); return
+    if _UPDATE["phase"] == "downloading":
+        return
+    first = (_UPDATE["checked"] == 0 and now > 4000)
+    again = (_UPDATE["checked"] != 0 and now - _UPDATE["checked"] > 120000)
+    if not (first or again):
+        return
+    _UPDATE["checked"] = now
+    import threading
+    def work():
+        try:
+            req = urllib.request.Request(_UPDATE_MANIFEST_URL + "?t=" + str(now),
+                                         headers={"User-Agent": "Mozilla/5.0"})
+            data = urllib.request.urlopen(req, timeout=15).read()
+            d = json.loads(data.decode("utf-8"))
+            _UPDATE["latest"] = int(d.get("version", 0))
+            if _UPDATE["latest"] > GAME_VERSION:
+                _UPDATE["show"] = True
+        except Exception as ex:
+            _UPDATE["err"] = str(ex)
+    threading.Thread(target=work, daemon=True).start()
+
+def _start_self_update():
+    _UPDATE["phase"] = "downloading"
+    import threading
+    def work():
+        try:
+            req = urllib.request.Request(_UPDATE_PY_URL + "?t=" + str(pygame.time.get_ticks()),
+                                         headers={"User-Agent": "Mozilla/5.0"})
+            data = urllib.request.urlopen(req, timeout=40).read()
+            if data and b"pygame" in data[:5000]:
+                with open(_SELF_PATH, "wb") as f:
+                    f.write(data)
+                try:
+                    with open(os.path.join(os.path.dirname(_SELF_PATH), "version.txt"), "w") as vf:
+                        vf.write(str(_UPDATE.get("latest") or ""))
+                except Exception:
+                    pass
+                _UPDATE["phase"] = "restart"
+            else:
+                _UPDATE["phase"] = "error"; _UPDATE["err"] = "пустой файл"; _UPDATE["show"] = False
+        except Exception as ex:
+            _UPDATE["phase"] = "error"; _UPDATE["err"] = str(ex); _UPDATE["show"] = False
+    threading.Thread(target=work, daemon=True).start()
+
+def _restart_game():
+    try: save_game(silent=True)
+    except Exception: pass
+    try: pygame.quit()
+    except Exception: pass
+    try:
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+    except Exception:
+        os._exit(0)
+
+def _update_btn_rects():
+    pw, ph = 470, 158
+    x = WIDTH // 2 - pw // 2; y = HEIGHT // 2 - ph // 2
+    return {"panel": pygame.Rect(x, y, pw, ph),
+            "download": pygame.Rect(x + 24, y + ph - 54, pw // 2 - 36, 40),
+            "later": pygame.Rect(x + pw // 2 + 12, y + ph - 54, pw // 2 - 36, 40)}
+
+def _draw_update_ui():
+    if not _UPDATE["show"]:
+        return
+    r = _update_btn_rects(); p = r["panel"]
+    dim = pygame.Surface((p.width + 16, p.height + 16), pygame.SRCALPHA)
+    dim.fill((0, 0, 0, 150)); screen.blit(dim, (p.x - 8, p.y - 8))
+    draw_round_gradient(p, (66, 76, 120), (34, 38, 60), 16)
+    pygame.draw.rect(screen, (245, 205, 70), p, 2, border_radius=16)
+    t1 = font_m.render("Доступно обновление!", True, (255, 225, 120))
+    screen.blit(t1, (p.centerx - t1.get_width() // 2, p.y + 16))
+    t2 = font_s.render("Версия " + str(GAME_VERSION) + "  →  " + str(_UPDATE.get("latest")), True, WHITE)
+    screen.blit(t2, (p.centerx - t2.get_width() // 2, p.y + 52))
+    if _UPDATE["phase"] == "downloading":
+        d = font_m.render("Скачивание...", True, (180, 220, 255))
+        screen.blit(d, (p.centerx - d.get_width() // 2, p.bottom - 46))
+    else:
+        draw_button(r["download"], "СКАЧАТЬ", (130, 205, 150), font=font_m)
+        draw_button(r["later"], "ПОЗЖЕ", (150, 175, 205), font=font_m)
+
+def _update_handle_click(pos):
+    if not _UPDATE["show"] or _UPDATE["phase"] == "downloading":
+        return False
+    r = _update_btn_rects()
+    if r["download"].collidepoint(pos):
+        _start_self_update(); return True
+    if r["later"].collidepoint(pos):
+        _UPDATE["show"] = False; return True
+    return False
+
+_real_eget_upd = pygame.event.get
+def _event_get_upd(*a, **k):
+    evs = _real_eget_upd(*a, **k)
+    if a or k:
+        return evs
+    out = []
+    for e in evs:
+        if e.type == pygame.MOUSEBUTTONDOWN and getattr(e, "button", 1) == 1 and _update_handle_click(e.pos):
+            continue
+        out.append(e)
+    return out
+pygame.event.get = _event_get_upd
+# ====================== /АВТО-ОБНОВЛЕНИЕ ======================
 
 # ====================== ГЛАВНЫЙ ЦИКЛ ======================
 running=True
