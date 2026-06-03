@@ -15,7 +15,7 @@ try:
 except Exception:
     SOUND_OK=False
 
-GAME_VERSION = 6  # версия игры для синхронизации профиля
+GAME_VERSION = 7  # версия игры для синхронизации профиля
 
 WIDTH, HEIGHT = 1100, 720
 screen = pygame.display.set_mode((WIDTH, HEIGHT), pygame.FULLSCREEN | pygame.SCALED)
@@ -297,7 +297,7 @@ for i, fn in enumerate(SKIN_FILES):
         except Exception:
             pass
 
-PROFILE = {"version": GAME_VERSION, "coins": 0, "unlocked_skins": [0], "skin_idx": 0, "sound": True, "volume": 0.7}
+PROFILE = {"version": GAME_VERSION, "coins": 0, "unlocked_skins": [0], "skin_idx": 0, "sound": True, "volume": 0.7, "achievements": []}
 
 def load_profile():
     if os.path.exists(PROFILE_FILE):
@@ -311,6 +311,7 @@ def load_profile():
             PROFILE["skin_idx"] = int(d.get("skin_idx", 0))
             PROFILE["sound"] = bool(d.get("sound", True))
             PROFILE["volume"] = float(d.get("volume", 0.7))
+            PROFILE["achievements"] = list(d.get("achievements", []))
             if d.get("version", 1) != GAME_VERSION:
                 PROFILE["version"] = GAME_VERSION
                 save_profile()
@@ -323,7 +324,8 @@ def save_profile():
     try:
         data = {"version": GAME_VERSION, "coins": PROFILE["coins"],
                 "unlocked_skins": PROFILE["unlocked_skins"], "skin_idx": PROFILE["skin_idx"],
-                "sound": PROFILE.get("sound", True), "volume": PROFILE.get("volume", 0.7)}
+                "sound": PROFILE.get("sound", True), "volume": PROFILE.get("volume", 0.7),
+                "achievements": PROFILE.get("achievements", [])}
         with open(PROFILE_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False)
     except Exception:
@@ -357,6 +359,8 @@ LEVELS_DATA = [
 LEVELS = LevelManager(LEVELS_DATA)
 MAPS = LEVELS.levels   # обратная совместимость со старым кодом
 PATH = MAPS[0]["path"]; ANDREY_POS = MAPS[0]["andrey"]; DIMA_POS = MAPS[0]["dima"]
+PATH2 = []          # вторая дорожка (сверху), строится в set_map
+PATHS = [PATH]       # все активные дорожки текущей карты
 INTERACT_R = 80
 
 BG_CACHE = None  # запечённый фон текущей карты (трава + тропинка)
@@ -368,34 +372,42 @@ def _tile_fill(surf, tile):
             surf.blit(tile, (xx, yy))
 
 def build_background():
-    """Запекает фон карты: тайлы травы + текстурная тропинка с тенью. Рендерится 1 раз на карту."""
+    """Запекает фон карты: тайлы травы + ВСЕ тропинки (PATHS) с тенью. Рендерится 1 раз на карту."""
     global BG_CACHE
     bg = pygame.Surface((WIDTH, HEIGHT))
     _tile_fill(bg, GRASS_TILE)
-    # мягкая тень-кайма под тропинкой
-    for i in range(len(PATH)-1):
-        pygame.draw.line(bg, (28,40,30), PATH[i], PATH[i+1], 54)
-    for p in PATH:
-        pygame.draw.circle(bg, (28,40,30), p, 27)
-    # сама тропинка — текстура земли, обрезанная по маске пути
+    # мягкая тень-кайма под тропинками
+    for _pth in PATHS:
+        for i in range(len(_pth)-1):
+            pygame.draw.line(bg, (28,40,30), _pth[i], _pth[i+1], 54)
+        for p in _pth:
+            pygame.draw.circle(bg, (28,40,30), p, 27)
+    # сами тропинки — текстура земли, обрезанная по маске путей
     dirt = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
     _tile_fill(dirt, DIRT_TILE)
     mask = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
-    for i in range(len(PATH)-1):
-        pygame.draw.line(mask, (255,255,255,255), PATH[i], PATH[i+1], 44)
-    for p in PATH:
-        pygame.draw.circle(mask, (255,255,255,255), p, 22)
+    for _pth in PATHS:
+        for i in range(len(_pth)-1):
+            pygame.draw.line(mask, (255,255,255,255), _pth[i], _pth[i+1], 44)
+        for p in _pth:
+            pygame.draw.circle(mask, (255,255,255,255), p, 22)
     dirt.blit(mask, (0,0), special_flags=pygame.BLEND_RGBA_MULT)
     bg.blit(dirt, (0,0))
-    # светлая серединка тропинки для объёма
-    for i in range(len(PATH)-1):
-        pygame.draw.line(bg, (150,122,86), PATH[i], PATH[i+1], 6)
+    # светлая серединка тропинок для объёма
+    for _pth in PATHS:
+        for i in range(len(_pth)-1):
+            pygame.draw.line(bg, (150,122,86), _pth[i], _pth[i+1], 6)
     BG_CACHE = bg
 
 def set_map(idx):
-    global PATH, ANDREY_POS, DIMA_POS
+    global PATH, PATH2, PATHS, ANDREY_POS, DIMA_POS
     m = MAPS[idx]
     PATH = m["path"]; ANDREY_POS = m["andrey"]; DIMA_POS = m["dima"]
+    # вторая дорожка строится автоматически: сверху к той же базе
+    ex, ey = PATH[-1]
+    midy = max(140, ey//2)
+    PATH2 = [(ex//2, -20), (ex//2, midy), (ex, midy), (ex, ey)]
+    PATHS = [PATH, PATH2]
     build_background()
 
 def dist(ax,ay,bx,by):
@@ -410,17 +422,19 @@ def point_seg_dist(px,py,ax,ay,bx,by):
     return dist(px,py, ax+t*dx, ay+t*dy)
 
 def near_path(x,y,margin=40):
-    for i in range(len(PATH)-1):
-        ax,ay = PATH[i]; bx,by = PATH[i+1]
-        if point_seg_dist(x,y,ax,ay,bx,by) < margin:
-            return True
+    for _pth in PATHS:
+        for i in range(len(_pth)-1):
+            ax,ay = _pth[i]; bx,by = _pth[i+1]
+            if point_seg_dist(x,y,ax,ay,bx,by) < margin:
+                return True
     return False
 
 def enemy_progress(e):
-    """Насколько враг продвинулся по пути (больше = ближе к базе)."""
+    """Насколько враг продвинулся по своему пути (больше = ближе к базе)."""
+    pth=getattr(e,"path",PATH)
     p=e.idx
-    if e.idx < len(PATH)-1:
-        ax,ay=PATH[e.idx]; bx,by=PATH[e.idx+1]
+    if e.idx < len(pth)-1:
+        ax,ay=pth[e.idx]; bx,by=pth[e.idx+1]
         seg=dist(ax,ay,bx,by)
         if seg>0:
             p+=min(1.0, dist(ax,ay,e.x,e.y)/seg)
@@ -465,8 +479,258 @@ TURRETS = {
     "Огнемёт": {"dmg":4, "cooldown":0.06,"range":110,"cost":240,"color":ORANGE, "bspeed":9, "aoe":0, "slow":0,  "poison":0, "dtype":"fire"},
     "Мороз":   {"dmg":3, "cooldown":0.40,"range":150,"cost":170,"color":CYAN,   "bspeed":13,"aoe":0, "slow":1.4,"poison":0, "dtype":"ice"},
     "Яд":      {"dmg":3, "cooldown":0.8, "range":160,"cost":200,"color":POISONC,"bspeed":12,"aoe":0, "slow":0,  "poison":16,"dtype":"poison"},
+    "Банк":    {"dmg":0, "cooldown":1.0, "range":0,  "cost":260,"color":(90,200,140),"bspeed":1,"aoe":0,"slow":0,"poison":0,"dtype":"econ","income":18,"interval":3.0},
+    "Казарма": {"dmg":0, "cooldown":1.0, "range":0,  "cost":300,"color":(90,150,235),"bspeed":1,"aoe":0,"slow":0,"poison":0,"dtype":"summon","interval":5.0},
 }
-TURRET_ORDER = ["Пушка","Пулемёт","Огнемёт","Мороз","Яд"]
+TURRET_ORDER = ["Пушка","Пулемёт","Огнемёт","Мороз","Яд","Банк","Казарма"]
+
+# Ветвящаяся прокачка: на 3-м уровне башню можно специализировать (выбор из двух веток).
+TURRET_SPECS = {
+    "Пушка": [
+        {"key":"sniper","name":"Снайперская","desc":"Огромный урон по одной цели, медленный выстрел","color":CYAN,
+         "mods":{"dmg":3.2,"cooldown":1.9,"range":1.45}},
+        {"key":"shrapnel","name":"Осколочная","desc":"Бьёт по площади, накрывает группу врагов","color":ORANGE,
+         "mods":{"dmg":0.65,"cooldown":0.9,"aoe_set":95}},
+    ],
+    "Пулемёт": [
+        {"key":"gatling","name":"Гатлинг","desc":"Бешеная скорострельность","color":YELLOW,
+         "mods":{"dmg":0.9,"cooldown":0.45}},
+        {"key":"piercer","name":"Тяжёлый калибр","desc":"Реже, но очень больно бьёт","color":(190,190,210),
+         "mods":{"dmg":2.4,"cooldown":1.7,"range":1.15}},
+    ],
+    "Огнемёт": [
+        {"key":"inferno","name":"Инферно","desc":"Сильнее жжёт вблизи","color":(255,120,40),
+         "mods":{"dmg":1.8,"range":1.1}},
+        {"key":"plasma","name":"Плазма","desc":"Дальнобойный поток","color":(255,180,90),
+         "mods":{"dmg":1.2,"range":1.6,"cooldown":1.2}},
+    ],
+    "Мороз": [
+        {"key":"glacier","name":"Ледник","desc":"Замедляет сильнее и дольше","color":(150,230,255),
+         "mods":{"dmg":1.2,"slow_set":2.4}},
+        {"key":"shatter","name":"Криоудар","desc":"Больше урона по цели","color":(120,200,255),
+         "mods":{"dmg":3.0,"cooldown":1.4}},
+    ],
+    "Яд": [
+        {"key":"plague","name":"Чума","desc":"Усиленный яд (DoT)","color":(120,210,90),
+         "mods":{"dmg":1.4,"poison_mul":2.0}},
+        {"key":"acid","name":"Кислота","desc":"Прямой урон выше","color":(160,220,80),
+         "mods":{"dmg":2.4,"cooldown":1.3}},
+    ],
+}
+
+
+# ===== Wave Timeline + UI ветвящейся прокачки (само-подключение, без правок game loop) =====
+_WAVE_TRACK = {"wave": None, "total": 1}
+
+def _alive_enemies():
+    try: return [e for e in G.get("enemies", []) if getattr(e, "alive", True)]
+    except Exception: return []
+
+def _summarize_units(units):
+    groups = {}; order = []
+    for e in units:
+        col = tuple(e.color) if not isinstance(e.color, tuple) else e.color
+        key = (col, bool(getattr(e, "is_boss", False)), getattr(e, "kind", "normal"))
+        if key not in groups: groups[key] = 0; order.append(key)
+        groups[key] += 1
+    out = []
+    for key in order:
+        col, is_boss, kind = key
+        out.append((col, 11 if is_boss else 7, is_boss, groups[key]))
+    return out
+
+def draw_wave_timeline():
+    if G.get("state") != "wave": return
+    queue = G.get("spawn_queue", []); alive = _alive_enemies()
+    remaining = len(queue) + len(alive)
+    if _WAVE_TRACK["wave"] != G.get("wave"):
+        _WAVE_TRACK["wave"] = G.get("wave"); _WAVE_TRACK["total"] = max(1, remaining)
+    else:
+        _WAVE_TRACK["total"] = max(_WAVE_TRACK["total"], remaining)
+    total = max(1, _WAVE_TRACK["total"])
+    done = max(0, total - remaining); frac = max(0.0, min(1.0, done/total))
+    bw = 520; x = WIDTH//2 - bw//2; y = 60; h = 16
+    pygame.draw.rect(screen, (18,20,30), (x-3, y-3, bw+6, h+6), border_radius=10)
+    pygame.draw.rect(screen, (46,50,66), (x, y, bw, h), border_radius=8)
+    fillw = int(bw*frac)
+    if fillw > 4:
+        draw_round_gradient(pygame.Rect(x, y, fillw, h), (130,215,150), (60,150,90), 8)
+    pygame.draw.rect(screen, (150,160,185), (x, y, bw, h), 2, border_radius=8)
+    lbl = font_s.render("Волна " + str(G.get("wave", 1)) + "  •  врагов осталось: " + str(remaining), True, WHITE)
+    screen.blit(lbl, (x, y-20))
+    types = _summarize_units(list(queue) + alive)
+    ix = x + bw + 16; iy = y + h//2
+    for col, rad, is_boss, cnt in types[:6]:
+        pygame.draw.circle(screen, col, (ix, iy), rad)
+        pygame.draw.circle(screen, BLACK, (ix, iy), rad, 2)
+        c = font_s.render("x"+str(cnt), True, WHITE); screen.blit(c, (ix+rad+3, iy-8))
+        ix += rad*2 + 30
+
+def _selected_turret():
+    try:
+        t = G.get("sel_turret_obj")
+        if t is not None and t in G.get("turrets", []): return t
+    except Exception: pass
+    return None
+
+def _spec_options(t):
+    if t and getattr(t, "level", 1) >= 3 and getattr(t, "spec", None) is None:
+        return TURRET_SPECS.get(t.kind, [])
+    return []
+
+def _spec_panel_rects():
+    t = _selected_turret(); opts = _spec_options(t)
+    if not opts: return {}
+    pw = 460; ph = 158; x = WIDTH//2 - pw//2; y = HEIGHT//2 - ph//2
+    bw = (pw - 48)//2; rects = {}
+    for i, sp in enumerate(opts[:2]):
+        rects[sp["key"]] = pygame.Rect(x + 16 + i*(bw+16), y + 56, bw, ph - 72)
+    return rects
+
+def draw_spec_modal():
+    t = _selected_turret(); opts = _spec_options(t)
+    if not opts: return
+    pw = 460; ph = 158; x = WIDTH//2 - pw//2; y = HEIGHT//2 - ph//2
+    dim = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA); dim.fill((0,0,0,120)); screen.blit(dim, (0,0))
+    draw_round_gradient(pygame.Rect(x, y, pw, ph), (54,58,82), (34,36,54), 16)
+    pygame.draw.rect(screen, (245,205,70), (x, y, pw, ph), 2, border_radius=16)
+    title = font_m.render("Специализация: " + t.kind + " (ур. 3)", True, WHITE)
+    screen.blit(title, (x + pw//2 - title.get_width()//2, y + 14))
+    rects = _spec_panel_rects(); mp = pygame.mouse.get_pos()
+    for sp in opts[:2]:
+        r = rects[sp["key"]]; hover = r.collidepoint(mp); col = sp.get("color", (90,140,220))
+        top = tuple(min(255, int(c*(1.35 if hover else 1.15))) for c in col)
+        draw_round_gradient(r, top, tuple(int(c*0.6) for c in col), 12)
+        pygame.draw.rect(screen, WHITE if hover else (20,20,28), r, 2, border_radius=12)
+        n = font_m.render(sp["name"], True, (15,15,20)); screen.blit(n, (r.centerx - n.get_width()//2, r.y + 8))
+        words = sp["desc"].split(); line = ""; yy = r.y + 40
+        for w in words:
+            test = (line + " " + w).strip()
+            if font_s.size(test)[0] > r.width - 16:
+                screen.blit(font_s.render(line, True, (20,20,28)), (r.x + 10, yy)); yy += 18; line = w
+            else: line = test
+        if line: screen.blit(font_s.render(line, True, (20,20,28)), (r.x + 10, yy))
+
+def _apply_spec_choice(spec_key):
+    t = _selected_turret()
+    if t and getattr(t, "level", 1) >= 3 and getattr(t, "spec", None) is None:
+        if t.specialize(spec_key):
+            try: G["floats"].append(FloatText(t.x, t.y-30, t.spec_name, YELLOW))
+            except Exception: pass
+            play_sound("buy")
+
+class Ally:
+    """Союзник Казармы: идёт от базы по дороге навстречу врагам и дерётся."""
+    def __init__(self, hp=120, dmg=30, speed=78):
+        self.path = PATH
+        self.idx = len(self.path)-1
+        self.x, self.y = self.path[self.idx]
+        self.hp = hp; self.max_hp = hp; self.dmg = dmg; self.speed = speed
+        self.alive = True; self.atk_cd = 0.0; self.flash = 0.0
+    def update(self, dt):
+        if self.flash>0: self.flash-=dt
+        target=None; best=1e9
+        for e in G.get("enemies", []):
+            if getattr(e,"alive",False):
+                d=dist(self.x,self.y,e.x,e.y)
+                if d<34 and d<best: best=d; target=e
+        if target is not None:
+            self.atk_cd-=dt
+            if self.atk_cd<=0:
+                self.atk_cd=0.45
+                target.hit(self.dmg)
+                try: G["floats"].append(FloatText(target.x,target.y-target.radius,self.dmg,(120,200,255)))
+                except Exception: pass
+                self.hp-=16; self.flash=0.1
+                if self.hp<=0: self.alive=False
+            return
+        if self.idx>0:
+            tx,ty=self.path[self.idx-1]
+            d=dist(self.x,self.y,tx,ty); spd=self.speed*dt
+            if d<=spd:
+                self.x,self.y=tx,ty; self.idx-=1
+            else:
+                self.x+=(tx-self.x)/d*spd; self.y+=(ty-self.y)/d*spd
+        else:
+            self.alive=False
+    def draw(self, s):
+        x,y=int(self.x),int(self.y)
+        sh=pygame.Surface((24,10),pygame.SRCALPHA); pygame.draw.ellipse(sh,(0,0,0,90),sh.get_rect())
+        s.blit(sh,(x-12,y+8))
+        pygame.draw.circle(s,(80,160,255),(x,y),11)
+        pygame.draw.circle(s,(20,40,90),(x,y),11,2)
+        if self.flash>0: pygame.draw.circle(s,(255,255,255),(x,y),11,2)
+        pygame.draw.line(s,(225,232,248),(x+7,y-7),(x+15,y-15),3)
+        w=24; f=max(0.0,self.hp/self.max_hp)
+        pygame.draw.rect(s,(30,30,38),(x-w//2,y-20,w,4),border_radius=2)
+        pygame.draw.rect(s,(90,220,120),(x-w//2,y-20,int(w*f),4),border_radius=2)
+
+_LAST_TICK = [0]
+def _frame_dt():
+    now = pygame.time.get_ticks()
+    if _LAST_TICK[0]==0: _LAST_TICK[0]=now; return 0.0
+    dt=(now-_LAST_TICK[0])/1000.0; _LAST_TICK[0]=now
+    return max(0.0, min(0.1, dt))
+
+def _ensure_allies():
+    if not isinstance(G.get("allies"), list): G["allies"]=[]
+    return G["allies"]
+
+def _update_allies():
+    dt=_frame_dt()
+    if not isinstance(G, dict): return
+    if not G.get("endless") and G.get("max_waves",0) < 30:
+        G["max_waves"]=30
+    if G.get("state") not in ("wave","build"): return
+    allies=_ensure_allies()
+    for a in allies[:]:
+        a.update(dt)
+        if not a.alive: allies.remove(a)
+
+def _draw_allies():
+    try:
+        for a in _ensure_allies(): a.draw(screen)
+    except Exception:
+        pass
+
+def _draw_tl_safe():
+    try:
+        if isinstance(G, dict) and G.get("state") in ("wave", "build", "mutator_warn"):
+            _draw_allies()
+            draw_wave_timeline(); draw_spec_modal()
+    except Exception:
+        pass
+
+_real_flip2 = pygame.display.flip
+_real_update2 = pygame.display.update
+def _flip_tl(*a, **k):
+    _update_allies(); _draw_tl_safe(); return _real_flip2(*a, **k)
+def _update_tl(*a, **k):
+    _update_allies(); _draw_tl_safe(); return _real_update2(*a, **k)
+pygame.display.flip = _flip_tl
+pygame.display.update = _update_tl
+
+_real_event_get = pygame.event.get
+def _event_get_tl(*a, **k):
+    evs = _real_event_get(*a, **k)
+    if a or k: return evs
+    try:
+        rects = _spec_panel_rects()
+        if not rects: return evs
+        out = []
+        for e in evs:
+            if e.type == pygame.MOUSEBUTTONDOWN and getattr(e, "button", 1) == 1:
+                hit = None
+                for key, r in rects.items():
+                    if r.collidepoint(e.pos): hit = key; break
+                if hit is not None:
+                    _apply_spec_choice(hit); continue
+            out.append(e)
+        return out
+    except Exception:
+        return evs
+pygame.event.get = _event_get_tl
+# ===== /Wave Timeline + spec UI =====
 TRAPS = {
     "Шипы": {"cost":90,  "dmg":36, "uses":6, "radius":20, "color":(190,190,200)},
     "Мина": {"cost":140, "dmg":170,"radius":76,"color":(230,90,70)},
@@ -641,8 +905,13 @@ class Barrel:
     def __init__(self, x, y):
         self.x=x; self.y=y; self.radius=15; self.alive=True
         self.blast=120; self.dmg=240; self.wob=random.uniform(0,math.tau)
-    def explode(self):
+    def explode(self, chain=False):
         if not self.alive: return
+        # огнемёт БОЛЬШЕ не детонирует бочки: если рядом только fire-пули — игнор
+        if not chain:
+            near=[b for b in G.get("bullets",[]) if dist(self.x,self.y,b.x,b.y)<self.radius+12]
+            if near and all(getattr(b,"dtype",None)=="fire" for b in near):
+                return
         self.alive=False
         G["effects"].append(Effect(self.x,self.y,self.blast,(255,140,40)))
         add_shake(13); play_sound("boom")
@@ -656,7 +925,7 @@ class Barrel:
                 G["floats"].append(FloatText(e.x,e.y-e.radius,self.dmg,ORANGE,crit=True))
         for bar in G["barrels"]:        # цепная реакция
             if bar.alive and bar is not self and dist(self.x,self.y,bar.x,bar.y)<self.blast:
-                bar.explode()
+                bar.explode(chain=True)
     def draw(self, s):
         if not self.alive: return
         wob=math.sin(pygame.time.get_ticks()*0.004+self.wob)*1.5
@@ -890,8 +1159,11 @@ class Bullet:
 
 
 class Enemy:
-    def __init__(self,hp,speed,color,radius,reward,name=None,is_boss=False):
-        self.x,self.y = PATH[0]; self.idx=0
+    def __init__(self,hp,speed,color,radius,reward,name=None,is_boss=False,kind="normal",path=None):
+        self.path = path if path is not None else PATH
+        self.x,self.y = self.path[0]; self.idx=0
+        self.kind=kind                 # "normal" / "flying" / "shooter"
+        self.shoot_cd=random.uniform(0.8,1.8); self._counted=False
         self.max_hp=hp; self.hp=hp; self.speed=speed
         self.color=color; self.radius=radius; self.reward=reward
         self.name=name; self.is_boss=is_boss; self.alive=True; self.reached=False
@@ -920,15 +1192,37 @@ class Enemy:
             self.meg_y=self.y+math.sin(self.meg_ang)*self.water_r
         if self.poison_timer>0:
             self.hp-=self.poison_dps*dt; self.poison_timer-=dt
-            if self.hp<=0: self.alive=False; return
+            if self.hp<=0:
+                self.alive=False
+                if not self._counted: self._counted=True; G["kills"]=G.get("kills",0)+1
+                return
         spd=self.speed
         if self.speed_boost>0:
             spd*=1.8; self.speed_boost-=dt
         if self.slow_timer>0:
             spd*=0.45; self.slow_timer-=dt
         self.walk+=spd*dt*4.0  # двигается — качается
-        if self.idx < len(PATH)-1:
-            tx,ty = PATH[self.idx+1]
+        if self.kind=="flying":
+            # Призрак: летит по прямой к базе сквозь препятствия
+            tx,ty = self.path[-1]
+            d = dist(self.x,self.y,tx,ty)
+            if d<=spd or d<6:
+                self.reached=True; self.alive=False
+            else:
+                self.x += (tx-self.x)/d*spd; self.y += (ty-self.y)/d*spd
+            return
+        if self.kind=="shooter":
+            # Стрелок: тормозит рядом с Матвеем и стреляет в него
+            h=G.get("hero"); near = bool(h) and dist(self.x,self.y,h.x,h.y) < 340
+            self.shoot_cd-=dt
+            if near and self.shoot_cd<=0:
+                self.shoot_cd=1.6
+                a=math.atan2(h.y-self.y, h.x-self.x); bs=4.2
+                G.setdefault("enemy_bullets",[]).append(
+                    EnemyBullet(self.x, self.y, math.cos(a)*bs, math.sin(a)*bs, dmg=12))
+            if near: spd*=0.25   # притормаживает, чтобы стрелять
+        if self.idx < len(self.path)-1:
+            tx,ty = self.path[self.idx+1]
             d = dist(self.x,self.y,tx,ty)
             if d<=spd:
                 self.x,self.y = tx,ty; self.idx+=1
@@ -940,7 +1234,9 @@ class Enemy:
         self.hp-=dmg; self.flash=0.12
         if slow>0: self.slow_timer=slow
         if poison>0: self.add_poison(poison)
-        if self.hp<=0: self.alive=False
+        if self.hp<=0:
+            self.alive=False
+            if not self._counted: self._counted=True; G["kills"]=G.get("kills",0)+1
     def draw(self,s):
         # водяной круг Рената (рисуется ПОД боссом)
         if self.is_boss and self.boss_kind=="shark":
@@ -987,6 +1283,18 @@ class Enemy:
             pygame.draw.rect(s,(18,16,22),(bx-1,by-1,w+2,6),border_radius=3)
             col=(int(235-frac*155), int(60+frac*165), 70)
             pygame.draw.rect(s,col,(bx,by,int(w*frac),4),border_radius=2)
+        # маркеры особых врагов
+        if self.kind=="flying":
+            halo=pygame.Surface((self.radius*4,self.radius*4),pygame.SRCALPHA)
+            pygame.draw.circle(halo,(180,210,255,60),(self.radius*2,self.radius*2),self.radius*2)
+            s.blit(halo,(int(self.x-self.radius*2),int(cy-self.radius*2)))
+            pygame.draw.circle(s,(210,230,255),(int(self.x),int(cy)),self.radius+4,2)
+        elif self.kind=="shooter":
+            _h=G.get("hero")
+            ha=math.atan2(_h.y-self.y,_h.x-self.x) if _h else 0
+            ex=self.x+math.cos(ha)*(self.radius+10); ey=cy+math.sin(ha)*(self.radius+10)
+            pygame.draw.line(s,(40,40,48),(int(self.x),int(cy)),(int(ex),int(ey)),5)
+            pygame.draw.circle(s,(70,70,80),(int(ex),int(ey)),3)
         if self.name:
             t=font_s.render(self.name,True,WHITE)
             s.blit(t,(self.x-t.get_width()/2, self.y-self.radius-30))
@@ -1018,6 +1326,8 @@ class Turret:
         self.aoe=self.base["aoe"]; self.slow=self.base["slow"]
         self.timer=0.0; self.angle=0.0; self.target_angle=0.0
         self.priority=priority
+        self.spec=None; self.spec_name=None
+        self.income_timer=self.base.get("interval",3.0)
         self.invested=self.base["cost"]
         for lv in range(1, self.level):
             self.invested += int(self.base["cost"]*0.8*lv)
@@ -1032,6 +1342,22 @@ class Turret:
         return int(self.base["cost"]*0.8*self.level)
     def sell_value(self):
         return int(self.invested*0.5)
+    def can_specialize(self):
+        return self.level>=3 and getattr(self,"spec",None) is None and self.kind in TURRET_SPECS
+    def specialize(self, spec_key):
+        for sp in TURRET_SPECS.get(self.kind, []):
+            if sp["key"]==spec_key:
+                m=sp["mods"]
+                self.dmg*=m.get("dmg",1.0)
+                self.cooldown*=m.get("cooldown",1.0)
+                self.range*=m.get("range",1.0)
+                if "aoe_set" in m: self.aoe=m["aoe_set"]
+                if "slow_set" in m: self.slow=m["slow_set"]
+                if "poison_mul" in m and hasattr(self,"poison_dps"): self.poison_dps*=m["poison_mul"]
+                if sp.get("color"): self.color=sp["color"]
+                self.spec=sp["key"]; self.spec_name=sp["name"]
+                return True
+        return False
     def pick_target(self,enemies):
         rng=self.range*G.get("mut_range",1.0)   # мутатор «Туман» снижает радиус
         in_range=[e for e in enemies if e.alive and dist(self.x,self.y,e.x,e.y)<=rng]
@@ -1043,6 +1369,22 @@ class Turret:
         return max(in_range,key=enemy_progress)  # Первый
     def update(self,dt,enemies,bullets):
         self.timer-=dt
+        if self.base.get("dtype")=="econ":   # Банк: не стреляет, даёт пассивный доход
+            self.income_timer=getattr(self,"income_timer",self.base.get("interval",3.0))-dt
+            if self.income_timer<=0:
+                self.income_timer=self.base.get("interval",3.0)
+                amt=self.base.get("income",15)+(self.level-1)*8
+                G["money"]=G.get("money",0)+amt
+                G["floats"].append(FloatText(self.x,self.y-24,"+"+str(amt),(245,225,150)))
+                play_sound("buy", throttle_ms=80)
+            return
+        if self.base.get("dtype")=="summon":   # Казарма: призывает союзников на дорогу
+            self.income_timer=getattr(self,"income_timer",self.base.get("interval",5.0))-dt
+            if self.income_timer<=0:
+                self.income_timer=self.base.get("interval",5.0)
+                _ensure_allies().append(Ally(hp=90+self.level*45, dmg=22+self.level*12, speed=78))
+                play_sound("buy", throttle_ms=120)
+            return
         if G.get("turret_stun",0)>0:   # башни оглушены битой Валеры
             return
         target=self.pick_target(enemies)
@@ -1071,6 +1413,10 @@ class Turret:
         sh=pygame.Surface((base_r*2+10,base_r+8),pygame.SRCALPHA)
         pygame.draw.ellipse(sh,(0,0,0,90),sh.get_rect())
         s.blit(sh,(self.x-base_r-5,self.y+base_r-6))
+        if self.base.get("dtype")=="econ":
+            self._draw_bank(s, base_r, selected); return
+        if self.base.get("dtype")=="summon":
+            self._draw_barracks(s, base_r, selected); return
         if TURRET_BASE_IMG is not None and TURRET_CANNON_IMG is not None:
             # башня из двух картинок: неподвижная база + вращающаяся пушка
             draw_sprite(s, TURRET_BASE_IMG, self.x, self.y, 0.0, scale=(base_r*2)/TURRET_BASE_IMG.get_width())
@@ -1084,13 +1430,68 @@ class Turret:
             pygame.draw.circle(s,LIGHT,(int(self.x),int(self.y)),base_r+4,2)
         if self.level>=3:
             pygame.draw.circle(s,YELLOW,(int(self.x),int(self.y)),base_r+8,2)
-        pygame.draw.circle(s,self.color,(int(self.x),int(self.y)),base_r)
-        pygame.draw.circle(s,YELLOW if selected else BLACK,(int(self.x),int(self.y)),base_r,3 if selected else 2)
-        # ствол растёт и утолщается с уровнем
-        blen=20+self.level*4; bw=4+self.level
-        ex=self.x+math.cos(self.angle)*blen; ey=self.y+math.sin(self.angle)*blen
-        pygame.draw.line(s,BLACK,(int(self.x),int(self.y)),(int(ex),int(ey)),bw)
-        pygame.draw.circle(s,(55,55,68),(int(self.x),int(self.y)),max(4,self.level+3))
+        self._draw_body(s, base_r, selected)
+
+    def _draw_body(self, s, base_r, selected):
+        """Корпус башни с уникальной моделью под каждый тип/специализацию."""
+        x,y=int(self.x),int(self.y); k=self.kind; spec=getattr(self,"spec",None)
+        a=self.angle; cs,sn=math.cos(a),math.sin(a)
+        pygame.draw.circle(s,self.color,(x,y),base_r)
+        pygame.draw.circle(s,YELLOW if selected else BLACK,(x,y),base_r,3 if selected else 2)
+        def barrel(length,width,col=BLACK):
+            ex=x+cs*length; ey=y+sn*length
+            pygame.draw.line(s,col,(x,y),(int(ex),int(ey)),width)
+        if spec=="sniper":
+            barrel(36+self.level*3,4); pygame.draw.circle(s,CYAN,(x,y),5)
+        elif spec=="shrapnel":
+            for da in (-0.34,0.0,0.34):
+                ex=x+math.cos(a+da)*(24+self.level*3); ey=y+math.sin(a+da)*(24+self.level*3)
+                pygame.draw.line(s,BLACK,(x,y),(int(ex),int(ey)),5)
+            pygame.draw.circle(s,ORANGE,(x,y),5)
+        elif k=="Пушка":
+            barrel(24+self.level*4,9+self.level); pygame.draw.circle(s,(60,60,72),(x,y),max(5,self.level+4))
+        elif k=="Пулемёт":
+            for oy in (-3,3):
+                sx=x-sn*oy; sy=y+cs*oy
+                ex=x+cs*(22+self.level*3)-sn*oy; ey=y+sn*(22+self.level*3)+cs*oy
+                pygame.draw.line(s,BLACK,(int(sx),int(sy)),(int(ex),int(ey)),3+self.level//2)
+        elif k=="Огнемёт":
+            barrel(18+self.level*2,9+self.level)
+            ex=x+cs*(18+self.level*2); ey=y+sn*(18+self.level*2)
+            pygame.draw.circle(s,(70,40,30),(int(ex),int(ey)),5)
+        elif k=="Мороз":
+            pts=[(x+math.cos(a+i*math.pi/2)*base_r, y+math.sin(a+i*math.pi/2)*base_r) for i in range(4)]
+            pygame.draw.polygon(s,(180,240,255),[(int(px),int(py)) for px,py in pts],2)
+            barrel(20+self.level*2,5,(120,200,230))
+        elif k=="Яд":
+            barrel(18+self.level*2,6,(70,150,60))
+            pygame.draw.circle(s,POISONC,(int(x+cs*(18+self.level*2)),int(y+sn*(18+self.level*2))),5)
+        else:
+            barrel(20+self.level*4,4+self.level)
+        if spec is not None:
+            pygame.draw.circle(s,self.color,(x,y),base_r+11,2)
+
+    def _draw_bank(self, s, base_r, selected):
+        """Постройка пассивного дохода (не стреляет)."""
+        x,y=int(self.x),int(self.y)
+        body=pygame.Rect(0,0,base_r*2,base_r*2); body.center=(x,y)
+        draw_round_gradient(body,(120,220,160),(50,140,95),8)
+        pygame.draw.rect(s,(20,60,40),body,2,border_radius=8)
+        pygame.draw.polygon(s,(70,170,120),[(x-base_r-2,y-base_r+2),(x+base_r+2,y-base_r+2),(x,y-base_r-10)])
+        t=font_m.render("$",True,(20,60,40)); s.blit(t,(x-t.get_width()//2,y-t.get_height()//2))
+        if selected: pygame.draw.circle(s,YELLOW,(x,y),base_r+8,3)
+
+    def _draw_barracks(self, s, base_r, selected):
+        """Казарма: призывает союзников, идущих по дороге от базы."""
+        x,y=int(self.x),int(self.y)
+        body=pygame.Rect(0,0,base_r*2,int(base_r*1.7)); body.center=(x,y+2)
+        draw_round_gradient(body,(120,160,240),(45,80,170),6)
+        pygame.draw.rect(s,(18,30,70),body,2,border_radius=6)
+        pygame.draw.line(s,(40,50,90),(x,y-base_r-10),(x,y-base_r+2),2)
+        pygame.draw.polygon(s,(230,90,80),[(x,y-base_r-10),(x+14,y-base_r-6),(x,y-base_r-2)])
+        pygame.draw.line(s,(230,235,255),(x-7,y+6),(x+7,y-6),3)
+        pygame.draw.line(s,(230,235,255),(x-7,y-6),(x+7,y+6),3)
+        if selected: pygame.draw.circle(s,YELLOW,(x,y),base_r+8,3)
 
 
 def _tp(x,y,cs,sn,lx,ly):
@@ -1177,6 +1578,7 @@ class Hero:
         # ---- оглушение (боссом Валерой) ----
         self.stun=0.0
     def update(self,dt,keys):
+        world_extras_update(dt)   # день/ночь, снаряды врагов, достижения
         if self.stun>0:
             self.stun-=dt; self.timer-=dt; self.hurt_cd-=dt
             return
@@ -1242,15 +1644,15 @@ def make_wave(n):
     endless=G.get("endless")
     es=(1.18**(n-15)) if (endless and n>15) else 1.0   # экспоненциальный рост (Endless)
     berserk = G.get("mutator")=="berserk"
-    if n % 5 == 0:
-        if n==5:
-            b=Enemy(2300, 1.4, PURPLE, 34, 320, "Ренат Мингаз", is_boss=True); b.boss_kind="shark"
+    if n % 10 == 0:
+        if n==10:
+            b=Enemy(2600, 1.4, PURPLE, 34, 320, "Ренат Мингаз", is_boss=True); b.boss_kind="shark"
             enemies.append(b)
-        elif n==10:
-            b=Enemy(4600, 1.6, ORANGE, 40, 520, "Валера Огнерубов", is_boss=True); b.boss_kind="stun"
+        elif n==20:
+            b=Enemy(5200, 1.6, ORANGE, 40, 520, "Валера Огнерубов", is_boss=True); b.boss_kind="stun"
             enemies.append(b)
         else:
-            b=Enemy(8500 + (n-15)*2300, 1.7, RED, 52, 1600, "Диван Шир", is_boss=True); b.boss_kind="summon"; b.ability_timer=15.0
+            b=Enemy(9000 + (n-30)*2300, 1.7, RED, 52, 1600, "Диван Шир", is_boss=True); b.boss_kind="summon"; b.ability_timer=15.0
             enemies.append(b)
         for i in range(6 + n):
             enemies.append(Enemy(60 + n*8, 2.2, GRAY, 12, 9))
@@ -1258,6 +1660,10 @@ def make_wave(n):
         for i in range(6 + n*2):
             col = RED if i%3 else BLUE
             enemies.append(Enemy(38 + n*16, 2.0 + n*0.05, col, 12, 7))
+        # Стрелки (bullet hell) — с 4-й волны
+        if n>=4:
+            for _ in range(1 + n//4):
+                enemies.append(Enemy(70 + n*14, 1.6, (240,150,60), 13, 12, kind="shooter"))
     if endless and es>1.0:            # Endless: экспоненциальный рост HP / скорости / числа
         for _ in range(int((es-1)*4)):
             enemies.append(Enemy(int((40+n*16)*es), 2.1, random.choice((RED,BLUE)), 12, 9))
@@ -1268,6 +1674,11 @@ def make_wave(n):
     if berserk:                       # мутатор «Берсерки»: быстрее, но меньше HP
         for e in enemies:
             e.max_hp=max(1,int(e.max_hp*0.6)); e.hp=e.max_hp; e.speed*=1.4
+    # С 5-й волны часть врагов идёт по ВТОРОЙ дорожке (сверху) — два фронта
+    if n>=5 and len(PATHS)>1:
+        for i,e in enumerate(enemies):
+            if not e.is_boss and i%2==1:
+                e.path=PATHS[1]; e.idx=0; e.x,e.y=e.path[0]
     return enemies
 
 
@@ -1290,6 +1701,147 @@ class Camera:
 
 CAMERA = Camera()
 
+# ====================== НОВЫЕ СИСТЕМЫ (v7) ======================
+# Снаряды врагов, цикл день/ночь + освещение, достижения. Легко расширять.
+
+class EnemyBullet:
+    """Медленный снаряд вражеского «стрелка» — летит в Матвея (bullet hell)."""
+    def __init__(self, x, y, vx, vy, dmg=12):
+        self.x=x; self.y=y; self.vx=vx; self.vy=vy
+        self.dmg=dmg; self.radius=7; self.life=7.0; self.alive=True
+    def update(self, dt):
+        self.x+=self.vx; self.y+=self.vy; self.life-=dt
+        if self.life<=0 or not (-40<self.x<WIDTH+40 and -40<self.y<HEIGHT+40):
+            self.alive=False
+    def draw(self, s):
+        draw_additive_glow(s, self.x, self.y, 12, (255,80,90), intensity=150)
+        pygame.draw.circle(s,(230,60,70),(int(self.x),int(self.y)),self.radius)
+        pygame.draw.circle(s,(255,225,190),(int(self.x-2),int(self.y-2)),3)
+
+# ----- День / Ночь + динамическое освещение (фонарики) -----
+def night_strength():
+    """0.0 — день, 1.0 — глубокая ночь (плавный цикл)."""
+    return (1 - math.cos(G.get("daytime",0.0)*2*math.pi))/2
+
+_LIGHT_CACHE={}
+def get_light(radius):
+    """Кэшированная радиальная маска света (ярче в центре, гаснет к краю)."""
+    r=max(8,int(radius))
+    if r in _LIGHT_CACHE: return _LIGHT_CACHE[r]
+    surf=pygame.Surface((r*2,r*2),pygame.SRCALPHA)
+    steps=22
+    for i in range(steps,0,-1):
+        rr=int(r*i/steps); a=int(255*(1-i/steps))
+        pygame.draw.circle(surf,(255,255,255,a),(r,r),rr)
+    _LIGHT_CACHE[r]=surf
+    return surf
+
+def draw_night_overlay():
+    """Тёмный слой ночи с «вырезанными» кругами света у Матвея и башен."""
+    ns=night_strength()
+    if ns<=0.03: return
+    overlay=pygame.Surface((WIDTH,HEIGHT),pygame.SRCALPHA)
+    overlay.fill((6,10,32,int(210*ns)))
+    overlay.fill((0,0,0,0), pygame.Rect(0,0,WIDTH,52))   # не затемнять верхний HUD
+    def cut(x,y,radius):
+        lm=get_light(radius)
+        overlay.blit(lm,(int(x-radius),int(y-radius)),special_flags=pygame.BLEND_RGBA_SUB)
+    h=G.get("hero")
+    if h: cut(h.x,h.y,160)                      # фонарик Матвея
+    for t in G.get("turrets",[]):
+        cut(t.x,t.y,95+t.level*10)              # подсветка вокруг башен
+    screen.blit(overlay,(0,0))
+
+# ----- Достижения (ачивки) -----
+ACHIEVEMENTS = [
+    {"id":"kill100","name":"Истребитель","desc":"Убить 100 врагов","reward":50,
+     "check":lambda g: g.get("kills",0)>=100},
+    {"id":"wave10","name":"Несокрушимый","desc":"Пережить 10 волн","reward":80,
+     "check":lambda g: g.get("wave",1)>=10},
+    {"id":"build5","name":"Архитектор","desc":"Построить 5 башен","reward":40,
+     "check":lambda g: g.get("max_turrets",0)>=5},
+]
+
+class AchToast:
+    """Плашка достижения: выезжает снизу с кубком, держится и уезжает."""
+    def __init__(self, name, reward):
+        self.name=name; self.reward=reward; self.t=0.0; self.life=3.8
+    def update(self, dt):
+        self.t+=dt; return self.t<self.life
+    def draw(self, s, slot=0):
+        appear=min(1.0,self.t/0.4); leave=min(1.0,max(0.0,(self.life-self.t)/0.4))
+        k=min(appear,leave)
+        w,hh=330,62; x=WIDTH//2-w//2
+        base_y=HEIGHT-24-slot*(hh+10)
+        y=int(base_y - k*(hh+8))            # выезд снизу вверх
+        rect=pygame.Rect(x,y,w,hh)
+        draw_round_gradient(rect,(60,52,90),(34,30,54),14)
+        pygame.draw.rect(s,(245,205,70),rect,2,border_radius=14)
+        cx,cy=x+34,y+hh//2                   # кубок
+        pygame.draw.polygon(s,(245,205,70),[(cx-12,cy-12),(cx+12,cy-12),(cx+8,cy+4),(cx-8,cy+4)])
+        pygame.draw.rect(s,(245,205,70),(cx-3,cy+4,6,8))
+        pygame.draw.rect(s,(220,180,60),(cx-9,cy+12,18,4),border_radius=2)
+        pygame.draw.arc(s,(245,205,70),(cx-20,cy-12,16,18),1.2,2.8,3)
+        pygame.draw.arc(s,(245,205,70),(cx+4,cy-12,16,18),0.34,1.94,3)
+        t1=font_m.render("Достижение!",True,(245,205,70))
+        t2=font_s.render(self.name,True,WHITE)
+        t3=font_s.render("+"+str(self.reward)+" монет",True,(245,225,150))
+        s.blit(t1,(x+62,y+8)); s.blit(t2,(x+62,y+32))
+        s.blit(t3,(x+w-t3.get_width()-14,y+34))
+
+def check_achievements():
+    """Проверяет достижения по состоянию и выдаёт монеты + плашку."""
+    G["max_turrets"]=max(G.get("max_turrets",0), len(G.get("turrets",[])))
+    done=PROFILE.setdefault("achievements",[])
+    for a in ACHIEVEMENTS:
+        if a["id"] not in done and a["check"](G):
+            done.append(a["id"])
+            PROFILE["coins"]=PROFILE.get("coins",0)+a["reward"]
+            G.setdefault("ach_toasts",[]).append(AchToast(a["name"],a["reward"]))
+            play_sound("buy"); save_profile()
+
+# ----- Покадровое обновление и отрисовка новых систем (вызывать из game loop) -----
+def world_extras_update(dt):
+    """Тик день/ночь + снаряды врагов (попадание по Матвею) + достижения. Раз за кадр."""
+    G["daytime"]=(G.get("daytime",0.0)+dt*0.012)%1.0   # полный цикл ~80с
+    h=G.get("hero")
+    bl=G.get("enemy_bullets",[])
+    for b in bl:
+        b.update(dt)
+        if h and b.alive and dist(b.x,b.y,h.x,h.y)<h.radius+b.radius:
+            b.alive=False
+            if h.hurt_cd<=0:
+                h.hp-=b.dmg; h.hurt_cd=0.45
+                add_hurt_flash(0.7); add_shake(5); play_sound("hurt")
+    G["enemy_bullets"]=[b for b in bl if b.alive]
+    check_achievements()
+    G["ach_toasts"]=[t for t in G.get("ach_toasts",[]) if t.update(dt)]
+
+def draw_night_and_extras():
+    """Затемнение ночи + свет, снаряды врагов и плашки достижений. В конце draw_game (перед HUD)."""
+    draw_night_overlay()
+    for b in G.get("enemy_bullets",[]):
+        b.draw(screen)
+    for i,t in enumerate(G.get("ach_toasts",[])):
+        t.draw(screen,i)
+
+# Авто-подключение ночи/достижений к КОНЦУ каждого кадра — без правок game loop.
+# Оборачиваем pygame.display.flip/update: рисуем оверлей поверх мира перед показом.
+_real_flip = pygame.display.flip
+_real_update = pygame.display.update
+def _draw_extras_safe():
+    try:
+        if isinstance(G, dict) and G.get("state") in ("wave","build","mutator_warn"):
+            draw_night_and_extras()
+    except Exception:
+        pass
+def _flip_with_extras(*a, **k):
+    _draw_extras_safe(); return _real_flip(*a, **k)
+def _update_with_extras(*a, **k):
+    _draw_extras_safe(); return _real_update(*a, **k)
+pygame.display.flip = _flip_with_extras
+pygame.display.update = _update_with_extras
+
 # ====================== СОСТОЯНИЕ ИГРЫ ======================
 def new_game(map_idx=None, hardcore=False, endless=False, max_waves=15):
     if map_idx is None:
@@ -1300,6 +1852,7 @@ def new_game(map_idx=None, hardcore=False, endless=False, max_waves=15):
         "endless": endless, "max_waves": max_waves, "level_name": MAPS[map_idx].get("name",""),
         "hero": Hero(), "turrets": [], "enemies": [], "bullets": [], "effects": [], "particles": [], "floats": [], "pickups": [], "shells": [], "splats": [],
         "barrels": [], "traps": [], "selected_trap": None, "drone": None, "lasers": [],
+        "enemy_bullets": [], "kills": 0, "max_turrets": 0, "daytime": 0.0, "ach_toasts": [],
         "spawn_queue": [], "spawn_timer": 0.0, "turret_stun": 0.0,
         "mutator": None, "mut_range": 1.0, "mut_gold": 1, "mut_warn_timer": 0.0,
         "owned_weapons": {"Пистолет"},
@@ -1698,6 +2251,12 @@ def draw_part2():
 
 # ----- Патч-ноты (история обновлений) -----
 PATCH_NOTES = [
+    ("Обновление 14 — Новые враги, ночь и достижения", [
+        "Призрак: летит напрямую к базе, игнорируя дорогу",
+        "Стрелок: останавливается и обстреливает Матвея (bullet hell)",
+        "Смена дня и ночи с динамическим освещением (фонарик у Матвея и башен)",
+        "Система достижений: награды монетами и всплывающие плашки",
+    ]),
     ("Обновление 13 — Карты, режимы и башни", [
         "Система уровней (LevelManager): легко добавлять новые карты",
         "Экран Выбора карты и режима в главном меню",
